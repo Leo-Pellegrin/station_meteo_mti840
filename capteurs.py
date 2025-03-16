@@ -1,10 +1,11 @@
 import time
-import os
-import Adafruit_DHT
+import os 
 import Adafruit_BMP.BMP085 as BMP085
 import RPi.GPIO as GPIO
 import smbus
-import PCF8591 as ADC
+from PCF8591 import PCF8591
+
+ADC = PCF8591(0x48)
 
 # Configuration des GPIO
 GPIO.setmode(GPIO.BCM)
@@ -15,7 +16,6 @@ class RainSensor:
         self.do_pin = do_pin
         self.adc_channel = adc_channel
         GPIO.setup(self.do_pin, GPIO.IN)
-        ADC.setup(0x48)
 
     def read(self):
         analog_value = ADC.read(self.adc_channel)
@@ -44,30 +44,149 @@ class DS18B20:
         temp_str = lines[1].split("t=")[-1]
         return float(temp_str) / 1000
 
-# ======= 3️⃣ Capteur DHT11 (Humidité & Température) =======
+# ======= 3️⃣ Capteur DHT11 (Humidité & Température) (Sans Adafruit_DHT) =======
+import time
+import RPi.GPIO as GPIO
+
 class DHT11:
     def __init__(self, pin=17):
+        """Initialisation du capteur DHT11 sur la broche spécifiée"""
         self.pin = pin
+        GPIO.setwarnings(False)  # Désactive les warnings GPIO
+        GPIO.setmode(GPIO.BCM)  # Mode BCM pour utiliser les numéros de GPIO
+        GPIO.setup(self.pin, GPIO.OUT)  # Configuration en sortie pour initier le signal
 
     def read(self):
-        humidity, temperature = Adafruit_DHT.read_retry(Adafruit_DHT.DHT11, self.pin)
-        return {
-            "humidity": humidity,
-            "temperature": temperature
-        }
+        """Lecture des données du capteur DHT11"""
+        MAX_UNCHANGE_COUNT = 100
+        STATE_INIT_PULL_DOWN = 1
+        STATE_INIT_PULL_UP = 2
+        STATE_DATA_FIRST_PULL_DOWN = 3
+        STATE_DATA_PULL_UP = 4
+        STATE_DATA_PULL_DOWN = 5
+
+        GPIO.setup(self.pin, GPIO.OUT)
+        GPIO.output(self.pin, GPIO.HIGH)
+        time.sleep(0.05)
+        GPIO.output(self.pin, GPIO.LOW)
+        time.sleep(0.02)
+        GPIO.setup(self.pin, GPIO.IN, GPIO.PUD_UP)
+
+        unchanged_count = 0
+        last = -1
+        data = []
+        while True:
+            current = GPIO.input(self.pin)
+            data.append(current)
+            if last != current:
+                unchanged_count = 0
+                last = current
+            else:
+                unchanged_count += 1
+                if unchanged_count > MAX_UNCHANGE_COUNT:
+                    break
+
+        state = STATE_INIT_PULL_DOWN
+        lengths = []
+        current_length = 0
+
+        for current in data:
+            current_length += 1
+
+            if state == STATE_INIT_PULL_DOWN:
+                if current == GPIO.LOW:
+                    state = STATE_INIT_PULL_UP
+                else:
+                    continue
+            elif state == STATE_INIT_PULL_UP:
+                if current == GPIO.HIGH:
+                    state = STATE_DATA_FIRST_PULL_DOWN
+                else:
+                    continue
+            elif state == STATE_DATA_FIRST_PULL_DOWN:
+                if current == GPIO.LOW:
+                    state = STATE_DATA_PULL_UP
+                else:
+                    continue
+            elif state == STATE_DATA_PULL_UP:
+                if current == GPIO.HIGH:
+                    current_length = 0
+                    state = STATE_DATA_PULL_DOWN
+                else:
+                    continue
+            elif state == STATE_DATA_PULL_DOWN:
+                if current == GPIO.LOW:
+                    lengths.append(current_length)
+                    state = STATE_DATA_PULL_UP
+                else:
+                    continue
+
+        if len(lengths) != 40:
+            return {"humidity": None, "temperature": None}
+
+        shortest_pull_up = min(lengths)
+        longest_pull_up = max(lengths)
+        halfway = (longest_pull_up + shortest_pull_up) / 2
+        bits = []
+        the_bytes = []
+        byte = 0
+
+        for length in lengths:
+            bit = 0
+            if length > halfway:
+                bit = 1
+            bits.append(bit)
+
+        for i in range(len(bits)):
+            byte = byte << 1
+            if bits[i]:
+                byte = byte | 1
+            if (i + 1) % 8 == 0:
+                the_bytes.append(byte)
+                byte = 0
+
+        if len(the_bytes) != 5:
+            return {"humidity": None, "temperature": None}
+
+        checksum = (the_bytes[0] + the_bytes[1] + the_bytes[2] + the_bytes[3]) & 0xFF
+        if the_bytes[4] != checksum:
+            return {"humidity": None, "temperature": None}
+
+        return {"humidity": the_bytes[0], "temperature": the_bytes[2]}
+
+    def cleanup(self):
+        """Libère les ressources GPIO"""
+        GPIO.cleanup()
 
 # ======= 4️⃣ Capteur de Pression BMP180 =======
 class Barometer:
     def __init__(self):
-        self.sensor = BMP085.BMP085()
+        self.sensor = BMP085.BMP085(busnum=1)
 
     def read(self):
         return {
-            "temperature": self.sensor.read_temperature(),
+	    "temperature": self.sensor.read_temperature(),
             "pressure": self.sensor.read_pressure()
         }
 
-# ======= 🔄 Boucle principale =======
+import requests
+import json
+
+# URL de l'API externe
+API_URL = "https://example.com/api/data"  # Remplace avec l'URL de ton API
+
+def send_to_api(data):
+    """Envoie les données au serveur via une requête HTTP POST"""
+    headers = {'Content-Type': 'application/json'}
+    try:
+        response = requests.post(API_URL, json=data, headers=headers, timeout=5)
+        if response.status_code == 200:
+            print("✅ Données envoyées avec succès !")
+        else:
+            print(f"⚠️ Erreur {response.status_code}: {response.text}")
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Erreur d'envoi : {e}")
+
 def main():
     print("🔎 Initialisation des capteurs...")
 
@@ -85,16 +204,24 @@ def main():
             dht_data = dht11.read()
             barometer_data = barometer.read()
 
-            # Affichage des résultats
+            # Construction des données à envoyer
+            data = {
+                "temperature_ds18b20": temp_ds18b20,
+                "humidity_dht11": dht_data["humidity"],
+                "temperature_dht11": dht_data["temperature"],
+                "pressure": barometer_data["pressure"],
+                "temperature_bmp180": barometer_data["temperature"],
+                "raining": rain_data["raining"]
+            }
+
+            # Affichage des données
             print("\n===== 🌡️ Données des Capteurs =====")
-            print(f"🌧️ Pluie : {'Oui' if rain_data['raining'] else 'Non'} (Analog: {rain_data['analog']})")
-            print(f"🔥 Température DS18B20 : {temp_ds18b20:.2f}°C")
-            print(f"💧 Humidité DHT11 : {dht_data['humidity']}%")
-            print(f"🌡️ Température DHT11 : {dht_data['temperature']}°C")
-            print(f"🌍 Pression BMP180 : {barometer_data['pressure']} Pa")
-            print(f"🌡️ Température BMP180 : {barometer_data['temperature']}°C")
-            
-            time.sleep(2)  # Pause de 2 secondes entre chaque lecture
+            print(json.dumps(data, indent=4))
+
+            # Envoi des données à l'API
+            send_to_api(data)
+
+            time.sleep(5)  # Pause avant la prochaine lecture
 
     except KeyboardInterrupt:
         print("\nArrêt du programme. Nettoyage des GPIO...")
