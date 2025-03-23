@@ -173,7 +173,7 @@ import requests
 import json
 
 # URL de l'API externe
-API_URL = "https://example.com/api/data"  # Remplace avec l'URL de ton API
+API_URL = "http://52.237.13.71:8000/add-data?bucket=station_meteo"  # Remplace avec l'URL de ton API
 
 def send_to_api(data):
     """Envoie les données au serveur via une requête HTTP POST"""
@@ -206,15 +206,14 @@ def main():
 
             # Construction des données à envoyer
             data = {
-                "temperature_ds18b20": temp_ds18b20,
-                "humidity_dht11": dht_data["humidity"],
-                "temperature_dht11": dht_data["temperature"],
-                "pressure": barometer_data["pressure"],
-                "temperature_bmp180": barometer_data["temperature"],
-                "raining": rain_data["raining"]
-            }
-
-            # Affichage des données
+                "pluie": int(1 if rain_data["raining"] else 0),  # Convertir explicitement en int
+                "temperature_DS18B20": float(temp_ds18b20) if temp_ds18b20 is not None else 0.0,
+                "humidity_dht11": float(dht_data["humidity"]) if dht_data["humidity"] is not None else 0.0,
+                "temperature_dht11": float(dht_data["temperature"]) if dht_data["temperature"] is not None else 0.0,
+                "pressure": float(barometer_data["pressure"]) if barometer_data["pressure"] is not None else 101325.0,
+                "temperature_bmp180": float(barometer_data["temperature"]) if barometer_data["temperature"] is not None else 0.0,
+            }                  
+            
             print("\n===== 🌡️ Données des Capteurs =====")
             print(json.dumps(data, indent=4))
 
